@@ -6,26 +6,30 @@
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>360 Video</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #000; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-    iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
-    #label {
-      position: fixed; top: 12px; left: 12px; z-index: 2;
-      padding: 6px 12px; border-radius: 6px;
-      background: rgba(0,0,0,.6); color: #fff; font-size: 14px; line-height: 1.3;
-      pointer-events: none; transition: opacity .6s;
-    }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    #player, #player iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+    /* Transparent drag surface; leaves the bottom 70px free for YouTube's controls */
+    #drag { position: fixed; top: 0; left: 0; right: 0; bottom: 70px; z-index: 2;
+      cursor: grab; touch-action: none; }
+    #drag.dragging { cursor: grabbing; }
+    #label, #status { position: fixed; left: 12px; z-index: 3; pointer-events: none;
+      padding: 6px 12px; border-radius: 6px; background: rgba(0,0,0,.6); color: #fff;
+      font-size: 14px; line-height: 1.3; transition: opacity .6s; }
+    #label { top: 12px; }
     #label small { display: block; opacity: .75; font-size: 12px; }
-    #msg { color: #ccc; display: none; position: fixed; inset: 0; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+    #status { bottom: 84px; display: none; max-width: 80vw; }
+    #msg { color: #ccc; display: none; position: fixed; inset: 0; align-items: center;
+      justify-content: center; text-align: center; padding: 24px; }
   </style>
 </head>
 <body>
+  <div id="player"></div>
+  <div id="drag" title="Drag to look around. Click to play or pause."></div>
   <div id="label"></div>
+  <div id="status"></div>
   <div id="msg">No video selected. Open this page from a map point.</div>
-  <iframe id="player"
-    title="360 video player"
-    allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture; fullscreen; web-share"
-    allowfullscreen
-    referrerpolicy="strict-origin-when-cross-origin"></iframe>
+
   <script>
     const q = new URLSearchParams(location.search);
     const v = (q.get('v') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 11);
@@ -33,15 +37,21 @@
     const area = (q.get('a') || '').slice(0, 80);
     const autoplay = q.get('autoplay') === '1' ? 1 : 0;
 
-    const player = document.getElementById('player');
     const label = document.getElementById('label');
+    const status = document.getElementById('status');
+    const drag = document.getElementById('drag');
+
+    function showStatus(text, ms) {
+      status.textContent = text;
+      status.style.display = 'block';
+      status.style.opacity = '1';
+      if (ms) setTimeout(() => { status.style.opacity = '0'; }, ms);
+    }
 
     if (!v) {
-      player.remove();
-      label.remove();
+      ['player', 'drag', 'label', 'status'].forEach(id => document.getElementById(id).remove());
       document.getElementById('msg').style.display = 'flex';
     } else {
-      player.src = `https://www.youtube.com/embed/${v}?start=${t}&mute=1&rel=0&playsinline=1&autoplay=${autoplay}`;
       const mm = Math.floor(t / 60), ss = String(t % 60).padStart(2, '0');
       if (area) {
         label.textContent = area;
@@ -53,7 +63,93 @@
         label.textContent = `Starts at ${mm}:${ss} · Drag to look around`;
       }
       setTimeout(() => { label.style.opacity = '0'; }, 6000);
+
+      // Load the YouTube IFrame Player API
+      const s = document.createElement('script');
+      s.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(s);
     }
+
+    let player, view = { yaw: 0, pitch: 0, roll: 0, fov: 100 }, is360 = null;
+
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('player', {
+        videoId: v,
+        playerVars: { start: t, mute: 1, rel: 0, playsinline: 1, autoplay: autoplay,
+                      origin: location.origin },
+        events: {
+          onStateChange: (e) => {
+            if (e.data === YT.PlayerState.PLAYING && is360 === null) {
+              // Spherical properties are only available once a 360 video is playing
+              setTimeout(check360, 800);
+            }
+          }
+        }
+      });
+    };
+
+    function check360() {
+      const p = player.getSphericalProperties ? player.getSphericalProperties() : null;
+      if (p && typeof p.yaw === 'number') {
+        is360 = true;
+        view = { yaw: p.yaw, pitch: p.pitch || 0, roll: 0, fov: p.fov || 100 };
+        showStatus('360 view active · drag to look around · scroll to zoom', 4000);
+      } else {
+        is360 = false;
+        showStatus('This player is not showing the video in 360. Report this result.', 0);
+      }
+    }
+
+    function apply() {
+      if (player && is360) player.setSphericalProperties(view);
+    }
+
+    // Drag to look around; a click without dragging toggles play/pause
+    let down = null;
+    drag.addEventListener('pointerdown', (e) => {
+      drag.setPointerCapture(e.pointerId);
+      down = { x: e.clientX, y: e.clientY, yaw: view.yaw, pitch: view.pitch, moved: false };
+      drag.classList.add('dragging');
+    });
+    drag.addEventListener('pointermove', (e) => {
+      if (!down) return;
+      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) down.moved = true;
+      const k = view.fov / window.innerWidth; // degrees per pixel scales with zoom
+      view.yaw = ((down.yaw - dx * k) % 360 + 360) % 360;
+      view.pitch = Math.max(-90, Math.min(90, down.pitch + dy * k));
+      apply();
+    });
+    function endDrag() {
+      if (!down) return;
+      const wasClick = !down.moved;
+      down = null;
+      drag.classList.remove('dragging');
+      if (wasClick && player && player.getPlayerState) {
+        const st = player.getPlayerState();
+        st === YT.PlayerState.PLAYING ? player.pauseVideo() : player.playVideo();
+      }
+    }
+    drag.addEventListener('pointerup', endDrag);
+    drag.addEventListener('pointercancel', endDrag);
+
+    // Scroll to zoom
+    drag.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      view.fov = Math.max(30, Math.min(120, view.fov + (e.deltaY > 0 ? 5 : -5)));
+      apply();
+    }, { passive: false });
+
+    // Arrow keys to look around
+    window.addEventListener('keydown', (e) => {
+      const step = 10;
+      if (e.key === 'ArrowLeft')  view.yaw = (view.yaw - step + 360) % 360;
+      else if (e.key === 'ArrowRight') view.yaw = (view.yaw + step) % 360;
+      else if (e.key === 'ArrowUp')    view.pitch = Math.min(90, view.pitch + step);
+      else if (e.key === 'ArrowDown')  view.pitch = Math.max(-90, view.pitch - step);
+      else return;
+      apply();
+    });
   </script>
 </body>
 </html>
