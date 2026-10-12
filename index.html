@@ -116,7 +116,7 @@
       const dx = e.clientX - down.x, dy = e.clientY - down.y;
       if (Math.abs(dx) + Math.abs(dy) > 4) down.moved = true;
       const k = view.fov / window.innerWidth; // degrees per pixel scales with zoom
-      view.yaw = ((down.yaw - dx * k) % 360 + 360) % 360;
+      view.yaw = ((down.yaw + dx * k) % 360 + 360) % 360;
       view.pitch = Math.max(-90, Math.min(90, down.pitch + dy * k));
       apply();
     });
